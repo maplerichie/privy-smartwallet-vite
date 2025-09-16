@@ -15,6 +15,11 @@ interface TransactionFormProps {
     amountLabel?: string
     amountPlaceholder?: string
     className?: string
+    // Controlled component props
+    toValue?: string
+    amountValue?: string
+    onToChange?: (value: string) => void
+    onAmountChange?: (value: string) => void
 }
 
 export function TransactionForm({
@@ -25,10 +30,35 @@ export function TransactionForm({
     buttonVariant = "default",
     amountLabel = "Amount",
     amountPlaceholder = "Enter amount",
-    className
+    className,
+    toValue,
+    amountValue,
+    onToChange,
+    onAmountChange
 }: TransactionFormProps) {
-    const [to, setTo] = useState("")
-    const [amount, setAmount] = useState("")
+    // Use internal state as fallback if not controlled
+    const [internalTo, setInternalTo] = useState("")
+    const [internalAmount, setInternalAmount] = useState("")
+
+    // Use controlled values if provided, otherwise use internal state
+    const to = toValue !== undefined ? toValue : internalTo
+    const amount = amountValue !== undefined ? amountValue : internalAmount
+
+    const handleToChange = (value: string) => {
+        if (onToChange) {
+            onToChange(value)
+        } else {
+            setInternalTo(value)
+        }
+    }
+
+    const handleAmountChange = (value: string) => {
+        if (onAmountChange) {
+            onAmountChange(value)
+        } else {
+            setInternalAmount(value)
+        }
+    }
 
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault()
@@ -36,8 +66,7 @@ export function TransactionForm({
 
         try {
             await onSubmit({ to, amount })
-            setTo("")
-            setAmount("")
+            // Don't reset automatically - let parent component handle it
         } catch (error) {
             console.error("Transaction failed:", error)
         }
@@ -57,7 +86,7 @@ export function TransactionForm({
                             type="text"
                             placeholder="0x..."
                             value={to}
-                            onChange={(e) => setTo(e.target.value)}
+                            onChange={(e) => handleToChange(e.target.value)}
                             disabled={loading}
                             className="font-mono"
                         />
@@ -70,7 +99,7 @@ export function TransactionForm({
                             step="any"
                             placeholder={amountPlaceholder}
                             value={amount}
-                            onChange={(e) => setAmount(e.target.value)}
+                            onChange={(e) => handleAmountChange(e.target.value)}
                             disabled={loading}
                         />
                     </div>

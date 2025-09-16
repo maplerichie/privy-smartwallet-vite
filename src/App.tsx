@@ -21,6 +21,17 @@ function App() {
     fetchData();
   }, [authenticated])
 
+  useEffect(() => {
+    const tryAuth = async () => {
+      if (!ready || !authenticated) return;
+      if (!user || !user.linkedAccounts || user.linkedAccounts.length < 3) return;
+
+      console.log('user', user);
+    };
+
+    tryAuth();
+  }, [ready, authenticated, user]);
+
   const smartWallet = user?.linkedAccounts.find((account) => account.type === 'smart_wallet');
 
   return (

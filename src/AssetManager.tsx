@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
-import { usePrivy } from '@privy-io/react-auth';
+import { usePrivy, useSendTransaction } from '@privy-io/react-auth';
 import { useSmartWallets } from '@privy-io/react-auth/smart-wallets';
-import { formatEther, parseEther, formatUnits, parseUnits, encodeFunctionData } from 'viem';
+import { formatEther, parseEther, formatUnits, parseUnits, encodeFunctionData, http, erc20Abi, erc721Abi } from 'viem';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Button } from '@/components/ui/button';
@@ -23,84 +23,39 @@ import {
     AlertDialogTitle
 } from '@/components/ui/alert-dialog';
 import { publicClient } from './lib/provider';
+import {
+    createZeroDevPaymasterClient,
+    createKernelAccountClient
+} from "@zerodev/sdk"
+import { polygonAmoy } from "viem/chains"
+
+// Wallet type enum
+type WalletType = 'embedded' | 'smart';
 
 
 // Contract addresses
 const FLY_ERC20 = "0x0A572a0aAAf39a201666dCE27328CE17bBCd8e28";
 const CBR_ERC721 = "0x2045a812A1AA47e012231bB82fB8079490885578";
 
+
 // ERC20 ABI
 const ERC20_ABI = [
-    {
-        "inputs": [{ "name": "account", "type": "address" }],
-        "name": "balanceOf",
-        "outputs": [{ "name": "", "type": "uint256" }],
-        "stateMutability": "view",
-        "type": "function"
-    },
-    {
-        "inputs": [{ "name": "to", "type": "address" }, { "name": "amount", "type": "uint256" }],
-        "name": "transfer",
-        "outputs": [{ "name": "", "type": "bool" }],
-        "stateMutability": "nonpayable",
-        "type": "function"
-    },
+    ...erc20Abi,
     {
         "inputs": [{ "name": "to", "type": "address" }, { "name": "amount", "type": "uint256" }],
         "name": "mint",
         "outputs": [],
         "stateMutability": "nonpayable",
         "type": "function"
-    },
-    {
-        "inputs": [{ "name": "spender", "type": "address" }, { "name": "amount", "type": "uint256" }],
-        "name": "approve",
-        "outputs": [{ "name": "", "type": "bool" }],
-        "stateMutability": "nonpayable",
-        "type": "function"
-    },
-    {
-        "inputs": [],
-        "name": "decimals",
-        "outputs": [{ "name": "", "type": "uint8" }],
-        "stateMutability": "view",
-        "type": "function"
     }
 ] as const;
 
 // ERC721 ABI
 const ERC721_ABI = [
-    {
-        "inputs": [{ "name": "owner", "type": "address" }],
-        "name": "balanceOf",
-        "outputs": [{ "name": "", "type": "uint256" }],
-        "stateMutability": "view",
-        "type": "function"
-    },
-    {
-        "inputs": [{ "name": "index", "type": "uint256" }],
-        "name": "ownerOf",
-        "outputs": [{ "name": "", "type": "uint256" }],
-        "stateMutability": "view",
-        "type": "function"
-    },
-    {
-        "inputs": [{ "name": "from", "type": "address" }, { "name": "to", "type": "address" }, { "name": "tokenId", "type": "uint256" }],
-        "name": "safeTransferFrom",
-        "outputs": [],
-        "stateMutability": "nonpayable",
-        "type": "function"
-    },
+    ...erc721Abi,
     {
         "inputs": [{ "name": "to", "type": "address" }],
         "name": "safeMint",
-        "outputs": [],
-        "stateMutability": "nonpayable",
-        "type": "function"
-    },
-    {
-        "inputs": [{ "name": "to", "type": "address" }, { "name": "tokenId", "type": "uint256" }],
-        "name": "approve",
         "outputs": [],
         "stateMutability": "nonpayable",
         "type": "function"
@@ -111,7 +66,25 @@ interface AssetManagerProps { }
 
 const AssetManager: React.FC<AssetManagerProps> = () => {
     const { user } = usePrivy();
+    const { sendTransaction } = useSendTransaction({
+        onSuccess: (tx) => {
+            setTransactionState({
+                status: 'success',
+                hash: tx.hash,
+                message: `Successful!`
+            });
+        },
+        onError: (error) => {
+            setTransactionState({
+                status: 'error',
+                error: `Transaction failed: ${error}`
+            });
+        }
+    });
     const { client } = useSmartWallets();
+
+    // Wallet type state
+    const [walletType, setWalletType] = useState<WalletType>('smart');
 
     // State for balances and data
     const [nativeBalance, setNativeBalance] = useState<string>('0');
@@ -139,13 +112,28 @@ const AssetManager: React.FC<AssetManagerProps> = () => {
         message?: string;
     }>({ status: 'idle' });
 
-    // Get smart wallet address
+    // Get wallet addresses
     const smartWallet = user?.linkedAccounts.find((account) => account.type === 'smart_wallet');
-    const walletAddress = smartWallet?.address;
+    const embeddedWallet = user?.wallet;
+
+    // Current wallet address based on selected type
+    const walletAddress = walletType === 'smart' ? smartWallet?.address : embeddedWallet?.address;
+
+    const paymasterClient = createZeroDevPaymasterClient({
+        chain: polygonAmoy,
+        transport: http('https://rpc.zerodev.app/api/v3/c06980c4-aa59-47c7-a13d-b55591727281/chain/80002?selfFunded=true'), // get the RPC on ZeroDev dashboard
+    })
+
+    const kernelClient = createKernelAccountClient({
+        chain: polygonAmoy,
+        bundlerTransport: http('https://rpc.zerodev.app/api/v3/c06980c4-aa59-47c7-a13d-b55591727281/chain/80002'),
+        paymaster: paymasterClient,
+        paymasterContext: { token: FLY_ERC20 }
+    })
 
     // Fetch balances and data
     const fetchData = async () => {
-        if (!client || !walletAddress) return;
+        if (!walletAddress) return;
 
         setLoading(true);
         try {
@@ -190,20 +178,22 @@ const AssetManager: React.FC<AssetManagerProps> = () => {
     };
 
     useEffect(() => {
-        if (client && walletAddress) {
+        if (walletAddress) {
             fetchData();
         }
-    }, [client, walletAddress]);
+    }, [walletAddress, walletType]);
 
     // Helper function to execute transactions with state management
     const executeTransaction = async (
-        transactionFn: () => Promise<string>,
-        successMessage: string
+        transactionFn: () => Promise<string | { hash: string }>,
+        successMessage: string,
+        resetFormOnSuccess: boolean = true
     ) => {
         setTransactionState({ status: 'pending', message: 'Processing transaction...' });
 
         try {
-            const txHash = await transactionFn();
+            const result = await transactionFn();
+            const txHash = typeof result === 'string' ? result : result.hash;
             setTransactionState({
                 status: 'success',
                 hash: txHash,
@@ -211,12 +201,17 @@ const AssetManager: React.FC<AssetManagerProps> = () => {
             });
             // Refresh data after successful transaction
             await fetchData();
+            // Reset form only on success if requested
+            if (resetFormOnSuccess) {
+                resetFormStates();
+            }
         } catch (error) {
             console.error('Transaction error:', error);
             setTransactionState({
                 status: 'error',
                 error: error instanceof Error ? error.message : 'Transaction failed'
             });
+            // Don't reset form on error - keep values for user to retry
         }
     };
 
@@ -225,168 +220,268 @@ const AssetManager: React.FC<AssetManagerProps> = () => {
         setTransactionState({ status: 'idle' });
     };
 
+    // Helper function to reset all form states
+    const resetFormStates = () => {
+        setTransferTo('');
+        setTransferValue('');
+        setMintTo('');
+        setMintValue('');
+        setApproveTo('');
+        setApproveValue('');
+        setTransferTokenId('');
+        setTransferTokenTo('');
+        setApproveTokenTo('');
+        setApproveTokenId('');
+    };
+
     // Native token transfer
     const handleNativeTransfer = async () => {
-        if (!client || !transferTo || !transferValue) return;
+        if (!transferTo || !transferValue) return;
 
         await executeTransaction(
             async () => {
-                const uiOptions = {
-                    showWalletUIs: true, // Privy UI will be shown
-                    title: 'Transfer POL',
-                    description: `Transfer ${transferValue} POL to ${transferTo}`,
-                    buttonText: 'Transfer'
-                };
-                return await client.sendTransaction({
-                    to: transferTo as `0x${string}`,
-                    value: parseEther(transferValue)
-                }, { uiOptions });
+                if (walletType === 'smart' && client) {
+                    const uiOptions = {
+                        showWalletUIs: true, // Privy UI will be shown
+                        title: 'Transfer POL',
+                        description: `Transfer ${transferValue} POL to ${transferTo}`,
+                        buttonText: 'Transfer'
+                    };
+                    return await client.sendTransaction({
+                        to: transferTo as `0x${string}`,
+                        value: parseEther(transferValue)
+                    }, { uiOptions });
+                } else {
+                    // Use embedded wallet
+                    return await sendTransaction({
+                        to: transferTo as `0x${string}`,
+                        value: parseEther(transferValue)
+                    });
+                }
             },
-            `Successfully transferred ${transferValue} POL to ${transferTo}`
+            `Successfully transferred ${transferValue} POL to ${transferTo}`,
+            true // Reset form on success
         );
     };
 
     // FLY ERC20 transfer
     const handleFlyTransfer = async () => {
-        if (!client || !transferTo || !transferValue) return;
+        if (!transferTo || !transferValue) return;
 
         await executeTransaction(
             async () => {
-                const uiOptions = {
-                    title: 'Transfer FLY',
-                    description: `Transfer ${transferValue} FLY to ${transferTo}`,
-                    buttonText: 'Transfer'
-                };
-                return await client.sendTransaction({
-                    to: FLY_ERC20 as `0x${string}`,
-                    data: encodeFunctionData({
-                        abi: ERC20_ABI,
-                        functionName: 'transfer',
-                        args: [transferTo as `0x${string}`, parseUnits(transferValue, 18)]
-                    })
-                }, { uiOptions });
+                if (walletType === 'smart' && client) {
+                    return await kernelClient.sendTransaction({
+                        account: client?.account,
+                        calls: [{
+                            to: FLY_ERC20 as `0x${string}`,
+                            data: encodeFunctionData({
+                                abi: ERC20_ABI,
+                                functionName: 'transfer',
+                                args: [transferTo as `0x${string}`, parseUnits(transferValue, 18)]
+                            }),
+                        }],
+                    });
+                } else {
+                    // Use embedded wallet
+                    return await sendTransaction({
+                        to: FLY_ERC20 as `0x${string}`,
+                        data: encodeFunctionData({
+                            abi: ERC20_ABI,
+                            functionName: 'transfer',
+                            args: [transferTo as `0x${string}`, parseUnits(transferValue, 18)]
+                        })
+                    });
+                }
             },
-            `Successfully transferred ${transferValue} FLY to ${transferTo}`
+            `Successfully transferred ${transferValue} FLY to ${transferTo}`,
+            true // Reset form on success
         );
     };
 
     // FLY ERC20 mint
     const handleFlyMint = async () => {
-        if (!client || !mintTo || !mintValue) return;
+        if (!mintTo || !mintValue) return;
 
         await executeTransaction(
             async () => {
-                const uiOptions = {
-                    title: 'Mint FLY',
-                    description: `Mint ${mintValue} FLY to ${mintTo}`,
-                    buttonText: 'Mint'
-                };
-                return await client.sendTransaction({
-                    to: FLY_ERC20 as `0x${string}`,
-                    data: encodeFunctionData({
-                        abi: ERC20_ABI,
-                        functionName: 'mint',
-                        args: [mintTo as `0x${string}`, parseUnits(mintValue, 18)]
-                    })
-                }, { uiOptions });
+                if (walletType === 'smart' && client) {
+                    const uiOptions = {
+                        title: 'Mint FLY',
+                        description: `Mint ${mintValue} FLY to ${mintTo}`,
+                        buttonText: 'Mint'
+                    };
+                    return await client.sendTransaction({
+                        to: FLY_ERC20 as `0x${string}`,
+                        data: encodeFunctionData({
+                            abi: ERC20_ABI,
+                            functionName: 'mint',
+                            args: [mintTo as `0x${string}`, parseUnits(mintValue, 18)]
+                        })
+                    }, { uiOptions });
+                } else {
+                    // Use embedded wallet
+                    return await sendTransaction({
+                        to: FLY_ERC20 as `0x${string}`,
+                        data: encodeFunctionData({
+                            abi: ERC20_ABI,
+                            functionName: 'mint',
+                            args: [mintTo as `0x${string}`, parseUnits(mintValue, 18)]
+                        })
+                    });
+                }
             },
-            `Successfully minted ${mintValue} FLY to ${mintTo}`
+            `Successfully minted ${mintValue} FLY to ${mintTo}`,
+            true // Reset form on success
         );
     };
 
     // FLY ERC20 approve
     const handleFlyApprove = async () => {
-        if (!client || !approveTo || !approveValue) return;
+        if (!approveTo || !approveValue) return;
 
         await executeTransaction(
             async () => {
-                const uiOptions = {
-                    title: 'Approve FLY',
-                    description: `Approve ${approveValue} FLY to ${approveTo}`,
-                    buttonText: 'Approve'
-                };
-                return await client.sendTransaction({
-                    to: FLY_ERC20 as `0x${string}`,
-                    data: encodeFunctionData({
-                        abi: ERC20_ABI,
-                        functionName: 'approve',
-                        args: [approveTo as `0x${string}`, parseUnits(approveValue, 18)]
-                    })
-                }, { uiOptions });
+                if (walletType === 'smart' && client) {
+                    const uiOptions = {
+                        title: 'Approve FLY',
+                        description: `Approve ${approveValue} FLY to ${approveTo}`,
+                        buttonText: 'Approve'
+                    };
+                    return await client.sendTransaction({
+                        to: FLY_ERC20 as `0x${string}`,
+                        data: encodeFunctionData({
+                            abi: ERC20_ABI,
+                            functionName: 'approve',
+                            args: [approveTo as `0x${string}`, parseUnits(approveValue, 18)]
+                        })
+                    }, { uiOptions });
+                } else {
+                    // Use embedded wallet
+                    return await sendTransaction({
+                        to: FLY_ERC20 as `0x${string}`,
+                        data: encodeFunctionData({
+                            abi: ERC20_ABI,
+                            functionName: 'approve',
+                            args: [approveTo as `0x${string}`, parseUnits(approveValue, 18)]
+                        })
+                    });
+                }
             },
-            `Successfully approved ${approveValue} FLY to ${approveTo}`
+            `Successfully approved ${approveValue} FLY to ${approveTo}`,
+            true // Reset form on success
         );
     };
 
+
     // CBR ERC721 transfer
     const handleTokenTransfer = async () => {
-        if (!client || !transferTokenTo || !transferTokenId) return;
+        if (!transferTokenTo || !transferTokenId) return;
 
         await executeTransaction(
             async () => {
-                const uiOptions = {
-                    title: 'Transfer Token',
-                    description: `Transfer token #${transferTokenId} to ${transferTokenTo}`,
-                    buttonText: 'Transfer'
-                };
-                return await client.sendTransaction({
-                    to: CBR_ERC721 as `0x${string}`,
-                    data: encodeFunctionData({
-                        abi: ERC721_ABI,
-                        functionName: 'safeTransferFrom',
-                        args: [walletAddress as `0x${string}`, transferTokenTo as `0x${string}`, BigInt(transferTokenId)]
-                    })
-                }, { uiOptions });
+                if (walletType === 'smart' && client) {
+                    const uiOptions = {
+                        title: 'Transfer Token',
+                        description: `Transfer token #${transferTokenId} to ${transferTokenTo}`,
+                        buttonText: 'Transfer'
+                    };
+                    return await client.sendTransaction({
+                        to: CBR_ERC721 as `0x${string}`,
+                        data: encodeFunctionData({
+                            abi: ERC721_ABI,
+                            functionName: 'safeTransferFrom',
+                            args: [walletAddress as `0x${string}`, transferTokenTo as `0x${string}`, BigInt(transferTokenId)]
+                        })
+                    }, { uiOptions });
+                } else {
+                    // Use embedded wallet
+                    return await sendTransaction({
+                        to: CBR_ERC721 as `0x${string}`,
+                        data: encodeFunctionData({
+                            abi: ERC721_ABI,
+                            functionName: 'safeTransferFrom',
+                            args: [walletAddress as `0x${string}`, transferTokenTo as `0x${string}`, BigInt(transferTokenId)]
+                        })
+                    });
+                }
             },
-            `Successfully transferred token #${transferTokenId} to ${transferTokenTo}`
+            `Successfully transferred token #${transferTokenId} to ${transferTokenTo}`,
+            true // Reset form on success
         );
     };
 
     // CBR ERC721 mint
     const handleTokenMint = async () => {
-        if (!client || !mintTo) return;
+        if (!mintTo) return;
 
         await executeTransaction(
             async () => {
-                const uiOptions = {
-                    title: 'Mint Token',
-                    description: `Mint token to ${mintTo}`,
-                    buttonText: 'Mint'
-                };
-                return await client.sendTransaction({
-                    to: CBR_ERC721 as `0x${string}`,
-                    data: encodeFunctionData({
-                        abi: ERC721_ABI,
-                        functionName: 'safeMint',
-                        args: [mintTo as `0x${string}`]
-                    })
-                }, { uiOptions });
+                if (walletType === 'smart' && client) {
+                    const uiOptions = {
+                        title: 'Mint Token',
+                        description: `Mint token to ${mintTo}`,
+                        buttonText: 'Mint'
+                    };
+                    return await client.sendTransaction({
+                        to: CBR_ERC721 as `0x${string}`,
+                        data: encodeFunctionData({
+                            abi: ERC721_ABI,
+                            functionName: 'safeMint',
+                            args: [mintTo as `0x${string}`]
+                        })
+                    }, { uiOptions });
+                } else {
+                    // Use embedded wallet
+                    return await sendTransaction({
+                        to: CBR_ERC721 as `0x${string}`,
+                        data: encodeFunctionData({
+                            abi: ERC721_ABI,
+                            functionName: 'safeMint',
+                            args: [mintTo as `0x${string}`]
+                        })
+                    });
+                }
             },
-            `Successfully minted token to ${mintTo}`
+            `Successfully minted token to ${mintTo}`,
+            true // Reset form on success
         );
     };
 
     // CBR ERC721 approve
     const handleTokenApprove = async () => {
-        if (!client || !approveTokenTo || !approveTokenId) return;
+        if (!approveTokenTo || !approveTokenId) return;
 
         await executeTransaction(
             async () => {
-                const uiOptions = {
-                    title: 'Approve Token',
-                    description: `Approve token #${approveTokenId} to ${approveTokenTo}`,
-                    buttonText: 'Approve'
-                };
-                return await client.sendTransaction({
-                    to: CBR_ERC721 as `0x${string}`,
-                    data: encodeFunctionData({
-                        abi: ERC721_ABI,
-                        functionName: 'approve',
-                        args: [approveTokenTo as `0x${string}`, BigInt(approveTokenId)]
-                    })
-                }, { uiOptions });
+                if (walletType === 'smart' && client) {
+                    const uiOptions = {
+                        title: 'Approve Token',
+                        description: `Approve token #${approveTokenId} to ${approveTokenTo}`,
+                        buttonText: 'Approve'
+                    };
+                    return await client.sendTransaction({
+                        to: CBR_ERC721 as `0x${string}`,
+                        data: encodeFunctionData({
+                            abi: ERC721_ABI,
+                            functionName: 'approve',
+                            args: [approveTokenTo as `0x${string}`, BigInt(approveTokenId)]
+                        })
+                    }, { uiOptions });
+                } else {
+                    // Use embedded wallet
+                    return await sendTransaction({
+                        to: CBR_ERC721 as `0x${string}`,
+                        data: encodeFunctionData({
+                            abi: ERC721_ABI,
+                            functionName: 'approve',
+                            args: [approveTokenTo as `0x${string}`, BigInt(approveTokenId)]
+                        })
+                    });
+                }
             },
-            `Successfully approved token #${approveTokenId} to ${approveTokenTo}`
+            `Successfully approved token #${approveTokenId} to ${approveTokenTo}`,
+            true // Reset form on success
         );
     };
 
@@ -396,7 +491,12 @@ const AssetManager: React.FC<AssetManagerProps> = () => {
                 <CardContent className="flex items-center justify-center py-8">
                     <div className="text-center space-y-2">
                         <div className="text-4xl">⚠️</div>
-                        <p className="text-muted-foreground">Please connect your smart wallet first</p>
+                        <p className="text-muted-foreground">
+                            {walletType === 'smart'
+                                ? 'Please connect your smart wallet first'
+                                : 'Please connect your embedded wallet first'
+                            }
+                        </p>
                     </div>
                 </CardContent>
             </Card>
@@ -410,10 +510,35 @@ const AssetManager: React.FC<AssetManagerProps> = () => {
                     <span className="text-2xl">💼</span>
                     Asset Manager
                 </CardTitle>
-                <div className="flex items-center gap-2 text-sm text-muted-foreground">
-                    <span>Network: Polygon Amoy</span>
-                    <Separator orientation="vertical" className="h-4" />
-                    <AddressDisplay address={walletAddress} />
+                <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                        <span>Network: Polygon Amoy</span>
+                        <Separator orientation="vertical" className="h-4" />
+                        <AddressDisplay address={walletAddress} showFull={true} />
+                    </div>
+                    <div className="flex items-center gap-2">
+                        <Label htmlFor="wallet-type" className="text-sm font-medium">
+                            Wallet:
+                        </Label>
+                        <div className="flex rounded-lg border p-1">
+                            <Button
+                                variant={walletType === 'embedded' ? 'default' : 'ghost'}
+                                size="sm"
+                                onClick={() => setWalletType('embedded')}
+                                className="h-7 px-3 text-xs"
+                            >
+                                Embedded
+                            </Button>
+                            <Button
+                                variant={walletType === 'smart' ? 'default' : 'ghost'}
+                                size="sm"
+                                onClick={() => setWalletType('smart')}
+                                className="h-7 px-3 text-xs"
+                            >
+                                Smart
+                            </Button>
+                        </div>
+                    </div>
                 </div>
             </CardHeader>
             <CardContent>
@@ -487,9 +612,7 @@ const AssetManager: React.FC<AssetManagerProps> = () => {
 
                             <TransactionForm
                                 title="Transfer POL"
-                                onSubmit={async ({ to, amount }) => {
-                                    setTransferTo(to);
-                                    setTransferValue(amount);
+                                onSubmit={async () => {
                                     await handleNativeTransfer();
                                 }}
                                 loading={loading}
@@ -497,6 +620,10 @@ const AssetManager: React.FC<AssetManagerProps> = () => {
                                 buttonVariant="default"
                                 amountLabel="Amount (POL)"
                                 amountPlaceholder="Enter POL amount"
+                                toValue={transferTo}
+                                amountValue={transferValue}
+                                onToChange={setTransferTo}
+                                onAmountChange={setTransferValue}
                             />
                         </TabsContent>
 
@@ -512,23 +639,23 @@ const AssetManager: React.FC<AssetManagerProps> = () => {
                             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                                 <TransactionForm
                                     title="Transfer FLY"
-                                    onSubmit={async ({ to, amount }) => {
-                                        setTransferTo(to);
-                                        setTransferValue(amount);
+                                    onSubmit={async () => {
                                         await handleFlyTransfer();
                                     }}
                                     loading={loading}
-                                    buttonText="Transfer FLY"
+                                    buttonText={`Transfer FLY`}
                                     buttonVariant="default"
                                     amountLabel="Amount (FLY)"
                                     amountPlaceholder="Enter FLY amount"
+                                    toValue={transferTo}
+                                    amountValue={transferValue}
+                                    onToChange={setTransferTo}
+                                    onAmountChange={setTransferValue}
                                 />
 
                                 <TransactionForm
                                     title="Mint FLY"
-                                    onSubmit={async ({ to, amount }) => {
-                                        setMintTo(to);
-                                        setMintValue(amount);
+                                    onSubmit={async () => {
                                         await handleFlyMint();
                                     }}
                                     loading={loading}
@@ -536,13 +663,15 @@ const AssetManager: React.FC<AssetManagerProps> = () => {
                                     buttonVariant="secondary"
                                     amountLabel="Amount (FLY)"
                                     amountPlaceholder="Enter FLY amount"
+                                    toValue={mintTo}
+                                    amountValue={mintValue}
+                                    onToChange={setMintTo}
+                                    onAmountChange={setMintValue}
                                 />
 
                                 <TransactionForm
                                     title="Approve FLY"
-                                    onSubmit={async ({ to, amount }) => {
-                                        setApproveTo(to);
-                                        setApproveValue(amount);
+                                    onSubmit={async () => {
                                         await handleFlyApprove();
                                     }}
                                     loading={loading}
@@ -550,6 +679,10 @@ const AssetManager: React.FC<AssetManagerProps> = () => {
                                     buttonVariant="outline"
                                     amountLabel="Amount (FLY)"
                                     amountPlaceholder="Enter FLY amount"
+                                    toValue={approveTo}
+                                    amountValue={approveValue}
+                                    onToChange={setApproveTo}
+                                    onAmountChange={setApproveValue}
                                 />
                             </div>
                         </TabsContent>
@@ -696,10 +829,11 @@ const AssetManager: React.FC<AssetManagerProps> = () => {
 
             {/* Pending Transaction Modal */}
             <AlertDialog open={transactionState.status === 'pending'}>
-                <AlertDialogContent className="sm:max-w-md">
+                <AlertDialogContent className="sm:max-w-md mx-auto">
                     <AlertDialogHeader>
                         <AlertDialogTitle className="flex items-center gap-2">
                             <LoadingSpinner size="sm" />
+                            Processing Transaction
                         </AlertDialogTitle>
                         <AlertDialogDescription>
                             {transactionState.message || 'Please wait while your transaction is being processed...'}
@@ -710,11 +844,11 @@ const AssetManager: React.FC<AssetManagerProps> = () => {
 
             {/* Success Transaction Modal */}
             <AlertDialog open={transactionState.status === 'success'}>
-                <AlertDialogContent className="sm:max-w-md">
+                <AlertDialogContent className="sm:max-w-md mx-auto">
                     <AlertDialogHeader>
                         <AlertDialogTitle className="flex items-center gap-2 text-green-600">
                             <span className="text-2xl">✅</span>
-                            Successful
+                            Transaction Successful
                         </AlertDialogTitle>
                         <AlertDialogDescription>
                             {transactionState.message}
@@ -728,7 +862,7 @@ const AssetManager: React.FC<AssetManagerProps> = () => {
                                 className="w-full overflow-hidden whitespace-nowrap text-ellipsis"
                                 onClick={() => window.open(`https://amoy.polygonscan.com/tx/${transactionState.hash}`, '_blank')}
                             >
-                                {transactionState.hash}
+                                View on PolygonScan: {transactionState.hash.slice(0, 10)}...
                             </Button>
                         </div>
                     )}
@@ -742,11 +876,11 @@ const AssetManager: React.FC<AssetManagerProps> = () => {
 
             {/* Error Transaction Modal */}
             <AlertDialog open={transactionState.status === 'error'}>
-                <AlertDialogContent className="sm:max-w-md">
+                <AlertDialogContent className="sm:max-w-md mx-auto">
                     <AlertDialogHeader>
                         <AlertDialogTitle className="flex items-center gap-2 text-red-600">
                             <span className="text-2xl">❌</span>
-                            Failed
+                            Transaction Failed
                         </AlertDialogTitle>
                         <AlertDialogDescription>
                             {transactionState.error || 'An error occurred while processing your transaction.'}
